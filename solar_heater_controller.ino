@@ -15,11 +15,14 @@
 // Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-const byte optocoupler = D5;
-const byte oneWireBus = D6;
+const byte relay = D3;
+const byte oneWireBus = D7;
 String yellowLineString = "";
-LiFoQueue queue(20);
-int triggerTemperature = 25;
+LiFoQueue queueHeater(20);
+LiFoQueue queueBuffer(20);
+int temperatureDelta = 5;
+const DeviceAddress heaterSensor = {0x28, 0x6C, 0x1E, 0x43, 0x98, 0x0C, 0x00, 0x56};
+const DeviceAddress bufferSensor = {0x28, 0x7F, 0x22, 0x43, 0x98, 0x25, 0x00, 0x82};
 // setup temperature sensor communication
 OneWire oneWire(oneWireBus);
 DallasTemperature sensors(&oneWire);
@@ -30,8 +33,8 @@ void setup() {
   WiFi.forceSleepBegin();
   initScreen();
   Serial.println("After init screen ...");
-  pinMode(optocoupler, OUTPUT);
-  digitalWrite(optocoupler, LOW);
+  pinMode(relay, OUTPUT);
+  digitalWrite(relay, HIGH);
 
   sensors.begin();
   //set the resolution to the max
@@ -51,43 +54,68 @@ void initScreen(){
   display.setTextColor(WHITE);
 }
 
-void pushToScreen(String message){
-  if (yellowLineString.length() > 9) {
-    yellowLineString = yellowLineString.substring(yellowLineString.indexOf(" ")+5, yellowLineString.length()) + message + " ";
-  }else {
-    yellowLineString = yellowLineString + message + " ";
-  } 
+void pushToScreen(String messageHeater, String messageBuffer){
+  yellowLineString = "H" + messageHeater + "B" + messageBuffer; 
   display.clearDisplay();
   display.setTextSize(2);
   display.setCursor(0, 0);
   display.println(yellowLineString);
   display.setTextSize(4);
   display.setCursor(12, 25);
-  display.println(String(queue.getAvarage(),1));
+  display.println(String(queueHeater.getAvarage(),1));
   display.display();
+}
+
+void readSensors() {
+  sensors.requestTemperatures(); // Send the command to get temperature readings
+  double valueHeater = sensors.getTempC(heaterSensor);
+  double valueBuffer = sensors.getTempC(bufferSensor);
+  //sensors.getTempCByIndex(1);
+  Serial.print("sensor heater reading: ");
+  Serial.println(valueHeater);
+  Serial.print("sensor buffer reading: ");
+  Serial.println(valueBuffer);
+  byte readingIndicator = 0;
+  //filter out the possible junk values
+  if (valueHeater  > -30 && valueHeater < 140) {
+    readingIndicator = readingIndicator + 1;
+  }
+  if (valueBuffer  > -30 && valueBuffer < 140 ) {
+    readingIndicator = readingIndicator + 2;
+  }
+  if (readingIndicator == 3) {
+    queueHeater.pushValue(valueHeater);
+    queueBuffer.pushValue(valueBuffer);
+    pushToScreen(String(valueHeater,1), String(valueBuffer,1));
+  } else {
+    if (readingIndicator == 1) {
+      pushToScreen(String(valueHeater,1), "JK");
+      Serial.println("junk values from buffer...");      
+    } else {
+      if (readingIndicator == 2) {
+        pushToScreen("JK", String(valueBuffer,1));
+        Serial.println("junk values from heater...");
+      }
+      else {
+        pushToScreen("JK", "JK");
+        Serial.println("junk values...");
+      }
+    }
+  }
 }
 
 void loop() {
   /*Serial.print("==");
   Serial.println(String(onSwitch));*/
-  sensors.requestTemperatures(); // Send the command to get temperature readings
-  double value = sensors.getTempCByIndex(0);
-
-  Serial.print("sensor reading: ");
-  Serial.println(value);
-  //filter out the possible junk values
-  if (value > -30 && value < 140) {
-    queue.pushValue(value);
-    pushToScreen(String(value,1));
-  } else {
-    Serial.println("junk value...");
-  }
-  if (queue.getSize()>= 10 && queue.getAvarage() >= triggerTemperature ) {
-    Serial.println("Set optocoupler HIGH");
-    //digitalWrite(optocoupler, HIGH);
-  } else {
-    //Serial.println("Set optocoupler LOW");
-    digitalWrite(optocoupler, LOW);
+  readSensors();
+  if (queueHeater.getSize()>=10 && queueBuffer.getSize()>=10) {
+   if (queueHeater.getAvarage() >= 85 || queueHeater.getAvarage() - temperatureDelta >= queueBuffer.getAvarage() ) {
+      Serial.println("Set optocoupler HIGH");
+      digitalWrite(relay, LOW);
+    } else {
+      Serial.println("Set optocoupler LOW");
+      digitalWrite(relay, HIGH);
+    }
   }
   /*Serial.print("Queue size: ");
   Serial.print(queue.getSize());
